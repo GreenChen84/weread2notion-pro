@@ -26,6 +26,7 @@ TAG_ICON_URL = "https://www.notion.so/icons/tag_gray.svg"
 USER_ICON_URL = "https://www.notion.so/icons/user-circle-filled_gray.svg"
 TARGET_ICON_URL = "https://www.notion.so/icons/target_red.svg"
 BOOKMARK_ICON_URL = "https://www.notion.so/icons/bookmark_gray.svg"
+LEGACY_SECRET_PROPERTIES = ("NotinToken", "NotinPage", "WeReadCookie")
 
 
 class NotionHelper:
@@ -202,9 +203,6 @@ class NotionHelper:
         ]
         properties = {
             "标题": {"title": {}},
-            "NotinToken": {"rich_text": {}},
-            "NotinPage": {"rich_text": {}},
-            "WeReadCookie": {"rich_text": {}},
             "根据划线颜色设置文字颜色": {"checkbox": {}},
             "同步书签": {"checkbox": {}},
             # "Cookie状态": {
@@ -238,15 +236,10 @@ class NotionHelper:
 
     def insert_to_setting_database(self):
         existing_pages = self.query(database_id=self.setting_database_id, filter={"property": "标题", "title": {"equals": "设置"}}).get("results")
-        properties = {
-            "标题": {"title": [{"type": "text", "text": {"content": "设置"}}]},
-            "最后同步时间": {"date": {"start": pendulum.now("Asia/Shanghai").isoformat()}},
-            "NotinToken": {"rich_text": [{"type": "text", "text": {"content": os.getenv("NOTION_TOKEN")}}]},
-            "NotinPage": {"rich_text": [{"type": "text", "text": {"content": os.getenv("NOTION_PAGE")}}]},
-            "WeReadCookie": {"rich_text": [{"type": "text", "text": {"content": os.getenv("WEREAD_COOKIE")}}]},
-        }
+        properties = self.build_setting_properties()
         if existing_pages:
             remote_properties = existing_pages[0].get("properties")
+            properties.update(self.get_legacy_secret_clear_properties(remote_properties))
             self.show_color = get_property_value(remote_properties.get("根据划线颜色设置文字颜色"))
             self.sync_bookmark = get_property_value(remote_properties.get("同步书签"))
             self.block_type = get_property_value(remote_properties.get("样式"))
@@ -260,6 +253,25 @@ class NotionHelper:
                 parent={"database_id": self.setting_database_id},
                 properties=properties,
             )
+
+    @staticmethod
+    def build_setting_properties():
+        """Return non-sensitive settings that are safe to store in Notion."""
+        return {
+            "标题": {"title": [{"type": "text", "text": {"content": "设置"}}]},
+            "最后同步时间": {
+                "date": {"start": pendulum.now("Asia/Shanghai").isoformat()}
+            },
+        }
+
+    @staticmethod
+    def get_legacy_secret_clear_properties(remote_properties):
+        """Clear legacy plaintext credentials without recreating removed fields."""
+        return {
+            name: {"rich_text": []}
+            for name in LEGACY_SECRET_PROPERTIES
+            if name in remote_properties
+        }
   
         
 

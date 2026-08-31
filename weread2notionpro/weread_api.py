@@ -78,13 +78,21 @@ class WeReadApi:
         if r.ok:
             return r.json()
         else:
-            errcode = r.json().get("errcode",0)
-            self.handle_errcode(errcode)
-            raise Exception(f"Could not get bookshelf {r.text}")
+            raise Exception(f"Could not get bookshelf ({self.safe_error_context(r)})")
         
     def handle_errcode(self,errcode):
         if( errcode== -2012 or errcode==-2010):
             print(f"::error::微信读书Cookie过期了，请参考文档重新设置。https://mp.weixin.qq.com/s/B_mqLUZv7M1rmXRsMlBf7A")
+
+    def safe_error_context(self, response):
+        """Return diagnostic metadata without logging response bodies or cookies."""
+        errcode = None
+        try:
+            errcode = response.json().get("errcode")
+        except (ValueError, AttributeError):
+            pass
+        self.handle_errcode(errcode)
+        return f"status={response.status_code}, errcode={errcode}"
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def get_notebooklist(self):
@@ -97,9 +105,7 @@ class WeReadApi:
             books.sort(key=lambda x: x["sort"])
             return books
         else:
-            errcode = r.json().get("errcode",0)
-            self.handle_errcode(errcode)
-            raise Exception(f"Could not get notebook list {r.text}")
+            raise Exception(f"Could not get notebook list ({self.safe_error_context(r)})")
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def get_bookinfo(self, bookId):
@@ -110,9 +116,7 @@ class WeReadApi:
         if r.ok:
             return r.json()
         else:
-            errcode = r.json().get("errcode",0)
-            self.handle_errcode(errcode)
-            print(f"Could not get book info {r.text}")
+            print(f"Could not get book info ({self.safe_error_context(r)})")
 
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
@@ -126,9 +130,9 @@ class WeReadApi:
             bookmarks = r.json().get("updated")
             return bookmarks
         else:
-            errcode = r.json().get("errcode",0)
-            self.handle_errcode(errcode)
-            raise Exception(f"Could not get {bookId} bookmark list")
+            raise Exception(
+                f"Could not get {bookId} bookmark list ({self.safe_error_context(r)})"
+            )
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def get_read_info(self, bookId):
@@ -154,9 +158,7 @@ class WeReadApi:
         if r.ok:
             return r.json()
         else:
-            errcode = r.json().get("errcode",0)
-            self.handle_errcode(errcode)
-            raise Exception(f"get {bookId} read info failed {r.text}")
+            raise Exception(f"get {bookId} read info failed ({self.safe_error_context(r)})")
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def get_review_list(self, bookId):
@@ -172,9 +174,7 @@ class WeReadApi:
             ]
             return reviews
         else:
-            errcode = r.json().get("errcode",0)
-            self.handle_errcode(errcode)
-            raise Exception(f"get {bookId} review list failed {r.text}")
+            raise Exception(f"get {bookId} review list failed ({self.safe_error_context(r)})")
 
 
 
@@ -185,9 +185,7 @@ class WeReadApi:
         if r.ok:
             return r.json()
         else:
-            errcode = r.json().get("errcode",0)
-            self.handle_errcode(errcode)
-            raise Exception(f"get history data failed {r.text}")
+            raise Exception(f"get history data failed ({self.safe_error_context(r)})")
 
     
 
@@ -215,7 +213,7 @@ class WeReadApi:
             )
             return {item["chapterUid"]: item for item in update}
         else:
-            raise Exception(f"get {bookId} chapter info failed {r.text}")
+            raise Exception(f"get {bookId} chapter info failed ({self.safe_error_context(r)})")
 
     def transform_id(self, book_id):
         id_length = len(book_id)

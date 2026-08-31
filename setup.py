@@ -1,14 +1,16 @@
 from setuptools import setup, find_packages
 
 setup(
-    version="0.2.2",
+    name="weread2notionpro",
+    version="0.2.3",
     packages=find_packages(),
     install_requires=[
-        "requests",
-        "pendulum",
-        "retrying",
-        "notion-client",
-        "github-heatmap",
+        "requests==2.32.4",
+        "pendulum==3.1.0",
+        "retrying==1.4.1",
+        "notion-client==2.4.0",
+        "github-heatmap==1.3.7",
+        "python-dotenv==1.1.1",
     ],
     entry_points={
         "console_scripts": [
@@ -28,5 +30,5 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
-    python_requires=">=3.6",
+    python_requires=">=3.11",
 )
