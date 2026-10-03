@@ -19,6 +19,10 @@ WEREAD_READDATA_DETAIL = "https://i.weread.qq.com/readdata/detail"
 WEREAD_HISTORY_URL = "https://i.weread.qq.com/readdata/summary?synckey=0"
 
 
+class WeReadResponseError(RuntimeError):
+    """A response failed validation; the message contains only safe metadata."""
+
+
 class WeReadApi:
     def __init__(self):
         self.cookie = self.get_cookie()
@@ -74,37 +78,74 @@ class WeReadApi:
         self.session.get(WEREAD_URL)
         params = dict(synckey=0, teenmode=0, album=1, onlyBookid=0)
         r = self.session.get(WEREAD_SHELF_SYNC_URL, params=params)
-        if r.ok:
-            return r.json()
-        else:
-            raise Exception(f"Could not get bookshelf ({self.safe_error_context(r)})")
+        data = self.validate_response(r, "bookshelf", ("books", "bookProgress", "archive"))
+        # These records are consumed as mappings by book.main.
+        for field in ("books", "bookProgress", "archive"):
+            if not all(isinstance(item, dict) for item in data[field]):
+                self.response_error(r, "bookshelf", "invalid_list_item", field)
+        return data
         
     def handle_errcode(self,errcode):
         if( errcode== -2012 or errcode==-2010):
-            print(f"::error::微信读书Cookie过期了，请参考文档重新设置。https://mp.weixin.qq.com/s/B_mqLUZv7M1rmXRsMlBf7A")
+            print("::error::微信读书认证失败或会话失效，请重新验证登录状态。")
 
     def safe_error_context(self, response):
         """Return diagnostic metadata without logging response bodies or cookies."""
         errcode = None
         try:
-            errcode = response.json().get("errcode")
+            data = response.json()
+            codes = ([data[key] for key in ("errCode", "errcode") if key in data]
+                     if isinstance(data, dict) else [])
+            # Prefer a nonzero code if both spellings are present. Never emit strings.
+            numeric_codes = [code for code in codes if type(code) is int]
+            if numeric_codes:
+                errcode = next((code for code in numeric_codes if code != 0), numeric_codes[0])
+            elif codes:
+                errcode = "non_integer"
         except (ValueError, AttributeError):
             pass
         self.handle_errcode(errcode)
         return f"status={response.status_code}, errcode={errcode}"
+
+    def response_error(self, response, endpoint, reason, field=None):
+        # Labels are fixed at call sites; never include URLs, bodies or exception text.
+        context = self.safe_error_context(response)
+        suffix = f", field={field}" if field is not None else ""
+        message = f"WeRead endpoint={endpoint}, {context}, reason={reason}{suffix}"
+        print(f"::error::{message}")
+        raise WeReadResponseError(message) from None
+
+    def validate_response(self, response, endpoint, list_fields=()):
+        try:
+            data = response.json()
+        except ValueError:
+            self.response_error(response, endpoint, "invalid_json")
+        if not isinstance(data, dict):
+            self.response_error(response, endpoint, "invalid_json_object")
+        codes = [data[key] for key in ("errCode", "errcode") if key in data]
+        if any(type(code) is not int for code in codes):
+            self.response_error(response, endpoint, "invalid_error_code_type")
+        if any(code != 0 for code in codes):
+            self.response_error(response, endpoint, "business_error")
+        if not 200 <= response.status_code < 300:
+            self.response_error(response, endpoint, "http_error")
+        for field in list_fields:
+            if field not in data:
+                self.response_error(response, endpoint, "missing_field", field)
+            if not isinstance(data[field], list):
+                self.response_error(response, endpoint, "invalid_list_type", field)
+        return data
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def get_notebooklist(self):
         """获取笔记本列表"""
         self.session.get(WEREAD_URL)
         r = self.session.get(WEREAD_NOTEBOOKS_URL)
-        if r.ok:
-            data = r.json()
-            books = data.get("books")
-            books.sort(key=lambda x: x["sort"])
-            return books
-        else:
-            raise Exception(f"Could not get notebook list ({self.safe_error_context(r)})")
+        books = self.validate_response(r, "notebooks", ("books",))["books"]
+        if not all(isinstance(book, dict) and type(book.get("sort")) in (int, float)
+                   for book in books):
+            self.response_error(r, "notebooks", "invalid_list_item", "books")
+        return sorted(books, key=lambda book: book["sort"])
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def get_bookinfo(self, bookId):
@@ -112,10 +153,7 @@ class WeReadApi:
         self.session.get(WEREAD_URL)
         params = dict(bookId=bookId)
         r = self.session.get(WEREAD_BOOK_INFO, params=params)
-        if r.ok:
-            return r.json()
-        else:
-            print(f"Could not get book info ({self.safe_error_context(r)})")
+        return self.validate_response(r, "book_info")
 
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
@@ -124,13 +162,7 @@ class WeReadApi:
         params = dict(bookId=bookId)
         headers = {"Referer": self.get_url(bookId)}
         r = self.session.get(WEREAD_BOOKMARKLIST_URL, params=params, headers=headers)
-        if r.ok:
-            bookmarks = r.json().get("updated")
-            return bookmarks
-        else:
-            raise Exception(
-                f"Could not get {bookId} bookmark list ({self.safe_error_context(r)})"
-            )
+        return self.validate_response(r, "bookmarks", ("updated",))["updated"]
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def get_read_info(self, bookId):
@@ -153,26 +185,20 @@ class WeReadApi:
             "User-Agent": "WeRead/8.2.5 WRBrand/xiaomi Dalvik/2.1.0 (Linux; U; Android 12; Redmi Note 7 Pro Build/SQ3A.220705.004)",
         }
         r = self.session.get(WEREAD_READ_INFO_URL,headers=headers, params=params)
-        if r.ok:
-            return r.json()
-        else:
-            raise Exception(f"get {bookId} read info failed ({self.safe_error_context(r)})")
+        return self.validate_response(r, "read_info")
 
     @retry(stop_max_attempt_number=3, wait_fixed=5000)
     def get_review_list(self, bookId):
         self.session.get(WEREAD_URL)
         params = dict(bookId=bookId, listType=11, mine=1, syncKey=0)
         r = self.session.get(WEREAD_REVIEW_LIST_URL, params=params)
-        if r.ok:
-            reviews = r.json().get("reviews")
-            reviews = list(map(lambda x: x.get("review"), reviews))
-            reviews = [
-                {"chapterUid": 1000000, **x} if x.get("type") == 4 else x
-                for x in reviews
-            ]
-            return reviews
-        else:
-            raise Exception(f"get {bookId} review list failed ({self.safe_error_context(r)})")
+        reviews = self.validate_response(r, "reviews", ("reviews",))["reviews"]
+        if not all(isinstance(item, dict) and isinstance(item.get("review"), dict)
+                   for item in reviews):
+            self.response_error(r, "reviews", "invalid_list_item", "reviews")
+        reviews = [item["review"] for item in reviews]
+        return [{"chapterUid": 1000000, **item} if item.get("type") == 4 else item
+                for item in reviews]
 
 
 
@@ -180,10 +206,7 @@ class WeReadApi:
     def get_api_data(self):
         self.session.get(WEREAD_URL)
         r = self.session.get(WEREAD_HISTORY_URL)
-        if r.ok:
-            return r.json()
-        else:
-            raise Exception(f"get history data failed ({self.safe_error_context(r)})")
+        return self.validate_response(r, "history")
 
     
 
@@ -192,13 +215,12 @@ class WeReadApi:
         self.session.get(WEREAD_URL)
         body = {"bookIds": [bookId], "synckeys": [0], "teenmode": 0}
         r = self.session.post(WEREAD_CHAPTER_INFO, json=body)
-        if (
-            r.ok
-            and "data" in r.json()
-            and len(r.json()["data"]) == 1
-            and "updated" in r.json()["data"][0]
-        ):
-            update = r.json()["data"][0]["updated"]
+        data = self.validate_response(r, "chapters", ("data",))["data"]
+        if (len(data) == 1 and isinstance(data[0], dict)
+                and isinstance(data[0].get("updated"), list)
+                and all(isinstance(item, dict) and "chapterUid" in item
+                        for item in data[0]["updated"])):
+            update = list(data[0]["updated"])
             update.append(
                 {
                     "chapterUid": 1000000,
@@ -211,7 +233,7 @@ class WeReadApi:
             )
             return {item["chapterUid"]: item for item in update}
         else:
-            raise Exception(f"get {bookId} chapter info failed ({self.safe_error_context(r)})")
+            self.response_error(r, "chapters", "invalid_chapter_data", "data")
 
     def transform_id(self, book_id):
         id_length = len(book_id)

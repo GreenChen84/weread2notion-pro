@@ -1,52 +1,25 @@
-name: weread note sync
+name: WeRead read-only diagnosis
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "17 0 * * *"
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+
 permissions:
   contents: read
+
 jobs:
-  sync:
-    name: Sync
+  diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-      NOTION_PAGE: ${{ secrets.NOTION_PAGE }}
-      WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
-      CC_URL: ${{ secrets.CC_URL }}
-      CC_ID: ${{ secrets.CC_ID }}
-      CC_PASSWORD: ${{ secrets.CC_PASSWORD }}
-      BOOK_DATABASE_NAME: ${{ vars.BOOK_DATABASE_NAME }}
-      AUTHOR_DATABASE_NAME: ${{ vars.AUTHOR_DATABASE_NAME }}
-      CATEGORY_DATABASE_NAME: ${{ vars.CATEGORY_DATABASE_NAME }}
-      BOOKMARK_DATABASE_NAME: ${{ vars.BOOKMARK_DATABASE_NAME }}
-      REVIEW_DATABASE_NAME: ${{ vars.REVIEW_DATABASE_NAME }}
-      CHAPTER_DATABASE_NAME: ${{ vars.CHAPTER_DATABASE_NAME }}
-      YEAR_DATABASE_NAME: ${{ vars.YEAR_DATABASE_NAME }}
-      WEEK_DATABASE_NAME: ${{ vars.WEEK_DATABASE_NAME }}
-      MONTH_DATABASE_NAME: ${{ vars.MONTH_DATABASE_NAME }}
-      DAY_DATABASE_NAME: ${{ vars.DAY_DATABASE_NAME }}
-      REF: ${{ github.ref }}
-      REPOSITORY: ${{ github.repository }}
+    timeout-minutes: 5
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - uses: actions/checkout@v7
         with:
-          python-version: 3.11
-      - name: Install dependencies
-        run: |
-          python -m pip install --disable-pip-version-check -r requirements.txt
-          python -m pip install --disable-pip-version-check --no-deps .
-      - name: weread book sync
-        run: |
-          book
-      - name: weread sync
-        run: |
-          weread
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - name: Install probe dependencies
+        run: python -m pip install --disable-pip-version-check requests==2.32.4 retrying==1.4.1
+      - name: Read-only WeRead probes
+        env:
+          WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
+        run: python tools/diagnose_weread.py
