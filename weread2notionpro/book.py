@@ -150,7 +150,7 @@ def insert_to_notion(page_id, timestamp, duration, book_database_id):
 
 
 weread_api = WeReadApi()
-notion_helper = NotionHelper()
+notion_helper = None
 archive_dict = {}
 notion_books = {}
 
@@ -158,7 +158,11 @@ notion_books = {}
 def main():
     global notion_books
     global archive_dict
+    global notion_helper
     bookshelf_books = weread_api.get_bookshelf()
+    notebooks = weread_api.get_notebooklist()
+    notebooks = [d["bookId"] for d in notebooks if "bookId" in d]
+    notion_helper = NotionHelper()
     notion_books = notion_helper.get_all_book()
     bookProgress = bookshelf_books.get("bookProgress")
     bookProgress = {book.get("bookId"): book for book in bookProgress}
@@ -181,8 +185,6 @@ def main():
             )
         ):
             not_need_sync.append(key)
-    notebooks = weread_api.get_notebooklist()
-    notebooks = [d["bookId"] for d in notebooks if "bookId" in d]
     books = bookshelf_books.get("books")
     books = [d["bookId"] for d in books if "bookId" in d]
     books = list((set(notebooks) | set(books)) - set(not_need_sync))

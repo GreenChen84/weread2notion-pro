@@ -74,7 +74,7 @@ class SecurityTests(unittest.TestCase):
     def test_bookmark_request_uses_reader_referer(self):
         api = WeReadApi.__new__(WeReadApi)
         api.session = MagicMock()
-        response = MagicMock(ok=True)
+        response = MagicMock(ok=True, status_code=200)
         response.json.return_value = {"updated": []}
         api.session.get.return_value = response
 
