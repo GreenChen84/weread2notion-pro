@@ -1,4 +1,4 @@
-name: WeRead read-only diagnosis
+name: WeRead isolated session renewal diagnosis
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ jobs:
           python-version: '3.11'
       - name: Install probe dependencies
         run: python -m pip install --disable-pip-version-check requests==2.32.4 retrying==1.4.1
-      - name: Read-only WeRead probes
+      - name: One bounded renewal and shelf verification
         env:
           WEREAD_COOKIE: ${{ secrets.WEREAD_COOKIE }}
         run: python tools/diagnose_weread.py
