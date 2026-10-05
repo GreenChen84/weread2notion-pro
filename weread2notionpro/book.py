@@ -161,6 +161,8 @@ def main():
     global notion_helper
     bookshelf_books = weread_api.get_bookshelf()
     notebooks = weread_api.get_notebooklist()
+    print(f"WeRead shelf validated: books={len(bookshelf_books['books'])}, "
+          f"progress={len(bookshelf_books['bookProgress'])}, notebooks={len(notebooks)}")
     notebooks = [d["bookId"] for d in notebooks if "bookId" in d]
     notion_helper = NotionHelper()
     notion_books = notion_helper.get_all_book()
@@ -190,6 +192,8 @@ def main():
     books = list((set(notebooks) | set(books)) - set(not_need_sync))
     for index, bookId in enumerate(books):
         insert_book_to_notion(books, index, bookId)
+    print(f"Notion book sync completed: book_pages_written={len(books)}, "
+          f"database_id={notion_helper.book_database_id}")
 
 
 if __name__ == "__main__":

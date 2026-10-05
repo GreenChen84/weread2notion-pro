@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import os
 import re
@@ -5,7 +6,7 @@ import re
 import requests
 from requests.utils import cookiejar_from_dict
 from retrying import retry
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 WEREAD_URL = "https://weread.qq.com/"
 WEREAD_NOTEBOOKS_URL = "https://weread.qq.com/api/user/notebook"
@@ -15,6 +16,13 @@ WEREAD_READ_INFO_URL = "https://weread.qq.com/web/book/readInfo"
 WEREAD_REVIEW_LIST_URL = "https://weread.qq.com/web/review/list"
 WEREAD_BOOK_INFO = "https://weread.qq.com/web/book/info"
 WEREAD_SHELF_SYNC_URL = "https://weread.qq.com/web/shelf/sync"
+WEREAD_RENEWAL_URL = "https://weread.qq.com/web/login/renewal"
+WEB_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Origin": "https://weread.qq.com",
+    "Referer": WEREAD_URL,
+    "Accept": "application/json, text/plain, */*",
+}
 WEREAD_READDATA_DETAIL = "https://i.weread.qq.com/readdata/detail"
 WEREAD_HISTORY_URL = "https://i.weread.qq.com/readdata/summary?synckey=0"
 
@@ -28,6 +36,87 @@ class WeReadApi:
         self.cookie = self.get_cookie()
         self.session = requests.Session()
         self.session.cookies = self.parse_cookie_string()
+        self.session.headers.update(WEB_HEADERS)
+        self._renewal_attempted = False
+        self.normalize_cookies()
+
+    def normalize_cookies(self, response=None):
+        """Keep one host-scoped cookie per name, preferring freshly returned values."""
+        selected = {}
+        for cookie in self.session.cookies:
+            if cookie.domain not in ("", "weread.qq.com", ".weread.qq.com"):
+                continue
+            old = selected.get(cookie.name)
+            if old is None or cookie.domain or not old.domain:
+                selected[cookie.name] = cookie
+        if response is not None:
+            for cookie in response.cookies:
+                if cookie.domain in ("weread.qq.com", ".weread.qq.com"):
+                    selected[cookie.name] = cookie
+        jar = requests.cookies.RequestsCookieJar()
+        for original in selected.values():
+            cookie = copy.copy(original)
+            cookie.domain = "weread.qq.com"
+            cookie.domain_specified = True
+            cookie.domain_initial_dot = False
+            cookie.path = "/"
+            cookie.path_specified = True
+            cookie.secure = True
+            if not cookie.is_expired():
+                jar.set_cookie(cookie)
+        self.session.cookies = jar
+
+    def _send(self, method, url, endpoint, **kwargs):
+        self.normalize_cookies()
+        try:
+            response = getattr(self.session, method)(
+                url, timeout=15, allow_redirects=False, **kwargs
+            )
+        except requests.RequestException:
+            # Transport exceptions can contain headers; never expose their message.
+            raise WeReadResponseError(
+                f"WeRead endpoint={endpoint}, reason=transport_error"
+            ) from None
+        self.normalize_cookies(response)
+        return response
+
+    def _request(self, method, url, endpoint, **kwargs):
+        response = self._send(method, url, endpoint, **kwargs)
+        try:
+            data = response.json()
+        except ValueError:
+            return response
+        if not isinstance(data, dict):
+            return response
+        codes = [data[key] for key in ("errCode", "errcode") if key in data]
+        if (not codes or any(type(code) is not int for code in codes)
+                or not any(code in (-2010, -2012) for code in codes)
+                or any(code not in (0, -2010, -2012) for code in codes)):
+            return response
+        if getattr(self, "_renewal_attempted", False):
+            return response
+        if not all(self.session.cookies.get(name)
+                   for name in ("wr_vid", "wr_skey", "wr_rt")):
+            return response
+        parts = urlsplit(url)
+        if parts.scheme != "https" or parts.netloc != "weread.qq.com":
+            return response
+        # Set before sending: failures and outer retries cannot repeat renewal.
+        self._renewal_attempted = True
+        renewal = self._send(
+            "post", WEREAD_RENEWAL_URL, "session_renewal",
+            headers=WEB_HEADERS,
+            json={"rq": quote(parts.path, safe=""),
+                  "ql": self.session.cookies.get("wr_ql") == "1"},
+        )
+        renewed = self.validate_response(renewal, "session_renewal")
+        if type(renewed.get("succ")) is not int or renewed["succ"] != 1:
+            self.response_error(renewal, "session_renewal", "renewal_not_confirmed")
+        print("WeRead session renewal=success; retrying original request once")
+        return self._send(method, url, endpoint, **kwargs)
+
+    def _bootstrap(self):
+        self._send("get", WEREAD_URL, "homepage")
 
     def try_get_cloud_cookie(self, url, id, password):
         if url.endswith("/"):
@@ -68,16 +157,16 @@ class WeReadApi:
         matches = pattern.findall(self.cookie)
         
         for key, value in matches:
-            cookies_dict[key] = value.encode('unicode_escape').decode('ascii')
+            cookies_dict[key.strip()] = value.encode('unicode_escape').decode('ascii')
         # 直接使用 cookies_dict 创建 cookiejar
         cookiejar = cookiejar_from_dict(cookies_dict)
         
         return cookiejar
 
     def get_bookshelf(self):
-        self.session.get(WEREAD_URL)
+        self._bootstrap()
         params = dict(synckey=0, teenmode=0, album=1, onlyBookid=0)
-        r = self.session.get(WEREAD_SHELF_SYNC_URL, params=params)
+        r = self._request("get", WEREAD_SHELF_SYNC_URL, "bookshelf", params=params)
         data = self.validate_response(r, "bookshelf", ("books", "bookProgress", "archive"))
         # These records are consumed as mappings by book.main.
         for field in ("books", "bookProgress", "archive"):
@@ -136,37 +225,41 @@ class WeReadApi:
                 self.response_error(response, endpoint, "invalid_list_type", field)
         return data
 
-    @retry(stop_max_attempt_number=3, wait_fixed=5000)
+    @retry(stop_max_attempt_number=3, wait_fixed=5000,
+           retry_on_exception=lambda error: not isinstance(error, WeReadResponseError))
     def get_notebooklist(self):
         """获取笔记本列表"""
-        self.session.get(WEREAD_URL)
-        r = self.session.get(WEREAD_NOTEBOOKS_URL)
+        self._bootstrap()
+        r = self._request("get", WEREAD_NOTEBOOKS_URL, "notebooks")
         books = self.validate_response(r, "notebooks", ("books",))["books"]
         if not all(isinstance(book, dict) and type(book.get("sort")) in (int, float)
                    for book in books):
             self.response_error(r, "notebooks", "invalid_list_item", "books")
         return sorted(books, key=lambda book: book["sort"])
 
-    @retry(stop_max_attempt_number=3, wait_fixed=5000)
+    @retry(stop_max_attempt_number=3, wait_fixed=5000,
+           retry_on_exception=lambda error: not isinstance(error, WeReadResponseError))
     def get_bookinfo(self, bookId):
         """获取书的详情"""
-        self.session.get(WEREAD_URL)
+        self._bootstrap()
         params = dict(bookId=bookId)
-        r = self.session.get(WEREAD_BOOK_INFO, params=params)
+        r = self._request("get", WEREAD_BOOK_INFO, "book_info", params=params)
         return self.validate_response(r, "book_info")
 
 
-    @retry(stop_max_attempt_number=3, wait_fixed=5000)
+    @retry(stop_max_attempt_number=3, wait_fixed=5000,
+           retry_on_exception=lambda error: not isinstance(error, WeReadResponseError))
     def get_bookmark_list(self, bookId):
-        self.session.get(WEREAD_URL)
+        self._bootstrap()
         params = dict(bookId=bookId)
         headers = {"Referer": self.get_url(bookId)}
-        r = self.session.get(WEREAD_BOOKMARKLIST_URL, params=params, headers=headers)
+        r = self._request("get", WEREAD_BOOKMARKLIST_URL, "bookmarks", params=params, headers=headers)
         return self.validate_response(r, "bookmarks", ("updated",))["updated"]
 
-    @retry(stop_max_attempt_number=3, wait_fixed=5000)
+    @retry(stop_max_attempt_number=3, wait_fixed=5000,
+           retry_on_exception=lambda error: not isinstance(error, WeReadResponseError))
     def get_read_info(self, bookId):
-        self.session.get(WEREAD_URL)
+        self._bootstrap()
         params = dict(
             noteCount=1,
             readingDetail=1,
@@ -184,14 +277,15 @@ class WeReadApi:
             "osver":"12",
             "User-Agent": "WeRead/8.2.5 WRBrand/xiaomi Dalvik/2.1.0 (Linux; U; Android 12; Redmi Note 7 Pro Build/SQ3A.220705.004)",
         }
-        r = self.session.get(WEREAD_READ_INFO_URL,headers=headers, params=params)
+        r = self._request("get", WEREAD_READ_INFO_URL, "read_info",headers=headers, params=params)
         return self.validate_response(r, "read_info")
 
-    @retry(stop_max_attempt_number=3, wait_fixed=5000)
+    @retry(stop_max_attempt_number=3, wait_fixed=5000,
+           retry_on_exception=lambda error: not isinstance(error, WeReadResponseError))
     def get_review_list(self, bookId):
-        self.session.get(WEREAD_URL)
+        self._bootstrap()
         params = dict(bookId=bookId, listType=11, mine=1, syncKey=0)
-        r = self.session.get(WEREAD_REVIEW_LIST_URL, params=params)
+        r = self._request("get", WEREAD_REVIEW_LIST_URL, "reviews", params=params)
         reviews = self.validate_response(r, "reviews", ("reviews",))["reviews"]
         if not all(isinstance(item, dict) and isinstance(item.get("review"), dict)
                    for item in reviews):
@@ -204,17 +298,18 @@ class WeReadApi:
 
     
     def get_api_data(self):
-        self.session.get(WEREAD_URL)
-        r = self.session.get(WEREAD_HISTORY_URL)
+        self._bootstrap()
+        r = self._request("get", WEREAD_HISTORY_URL, "history")
         return self.validate_response(r, "history")
 
     
 
-    @retry(stop_max_attempt_number=3, wait_fixed=5000)
+    @retry(stop_max_attempt_number=3, wait_fixed=5000,
+           retry_on_exception=lambda error: not isinstance(error, WeReadResponseError))
     def get_chapter_info(self, bookId):
-        self.session.get(WEREAD_URL)
+        self._bootstrap()
         body = {"bookIds": [bookId], "synckeys": [0], "teenmode": 0}
-        r = self.session.post(WEREAD_CHAPTER_INFO, json=body)
+        r = self._request("post", WEREAD_CHAPTER_INFO, "chapters", json=body)
         data = self.validate_response(r, "chapters", ("data",))["data"]
         if (len(data) == 1 and isinstance(data[0], dict)
                 and isinstance(data[0].get("updated"), list)

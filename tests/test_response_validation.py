@@ -3,6 +3,7 @@ import contextlib
 import io
 from pathlib import Path
 import unittest
+import requests
 from unittest.mock import MagicMock, patch
 
 from weread2notionpro.weread_api import WeReadApi, WeReadResponseError
@@ -12,6 +13,7 @@ class Response:
     def __init__(self, data, status=200):
         self.data = data
         self.status_code = status
+        self.cookies = requests.cookies.RequestsCookieJar()
 
     def json(self):
         if self.data is ...:

@@ -192,6 +192,7 @@ def append_blocks(id, contents):
             notion_helper.insert_review(id, value)
         else:
             notion_helper.insert_chapter(id, value)
+    return sum("bookmarkId" in value or "reviewId" in value for value in l)
 
 
 def content_to_block(content):
@@ -238,6 +239,8 @@ notion_helper = NotionHelper()
 def main():
     notion_books = notion_helper.get_all_book()
     books = weread_api.get_notebooklist()
+    books_written = 0
+    notes_written = 0
     if books != None:
         for index, book in enumerate(books):
             bookId = book.get("bookId")
@@ -254,12 +257,16 @@ def main():
             reviews = get_review_list(pageId,bookId)
             bookmark_list.extend(reviews)
             content = sort_notes(pageId, chapter, bookmark_list)
-            append_blocks(pageId, content)
+            notes_written += append_blocks(pageId, content)
             properties = {
                 "Sort":get_number(sort)
             }
             notion_helper.update_book_page(page_id=pageId,properties=properties)
+            books_written += 1
+    print(f"Notion note sync completed: book_pages_written={books_written}, "
+          f"new_note_records_written={notes_written}, "
+          f"review_database_id={notion_helper.review_database_id}, "
+          f"bookmark_database_id={notion_helper.bookmark_database_id}")
 
 if __name__ == "__main__":
     main()
-
